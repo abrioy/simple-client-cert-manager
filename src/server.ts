@@ -11,7 +11,10 @@ type EnvConfig = {
   stepCaUrl: string;
   stepCaSignPath: string;
   stepCaProfile?: string;
+  oidcAuthorizationEndpoint: string;
   oidcTokenEndpoint: string;
+  oidcClientId: string;
+  oidcScope: string;
   certificateSubject: string;
   certificateFilename: string;
   privateKeyFilename: string;
@@ -22,7 +25,10 @@ const env: EnvConfig = {
   stepCaUrl: process.env.STEP_CA_URL ?? "http://step-ca:9000",
   stepCaSignPath: process.env.STEP_CA_SIGN_PATH ?? "/1.0/sign",
   stepCaProfile: process.env.STEP_CA_PROFILE,
+  oidcAuthorizationEndpoint: process.env.OIDC_AUTHORIZATION_ENDPOINT ?? "",
   oidcTokenEndpoint: process.env.OIDC_TOKEN_ENDPOINT ?? "",
+  oidcClientId: process.env.OIDC_CLIENT_ID ?? "",
+  oidcScope: process.env.OIDC_SCOPE ?? "openid email profile",
   certificateSubject: process.env.CERTIFICATE_SUBJECT ?? "CN=client",
   certificateFilename: process.env.CERTIFICATE_FILENAME ?? "client.crt",
   privateKeyFilename: process.env.PRIVATE_KEY_FILENAME ?? "client.key"
@@ -185,7 +191,10 @@ function buildPage(config: EnvConfig): string {
     <script>
       (function () {
         const config = ${JSON.stringify({
-          oidcTokenEndpoint: config.oidcTokenEndpoint,
+          authorizationEndpoint: config.oidcAuthorizationEndpoint,
+          tokenEndpoint: config.oidcTokenEndpoint,
+          clientId: config.oidcClientId,
+          scope: config.oidcScope,
           subject: config.certificateSubject,
           certificateFilename: config.certificateFilename,
           privateKeyFilename: config.privateKeyFilename
@@ -196,24 +205,92 @@ function buildPage(config: EnvConfig): string {
         const keyLink = document.getElementById("key-link");
         const caSection = document.getElementById("ca-section");
         const caText = document.getElementById("ca-text");
+        let certificateUrl = null;
+        let keyUrl = null;
 
         if (!button || !status || !certLink || !keyLink || !caSection || !caText) {
           console.error("Page not initialised correctly");
           return;
         }
 
-        if (!config.oidcTokenEndpoint) {
-          status.textContent = "OIDC token endpoint is not configured.";
+        const requiredConfig = [];
+        if (!config.authorizationEndpoint) requiredConfig.push("OIDC authorization endpoint");
+        if (!config.tokenEndpoint) requiredConfig.push("OIDC token endpoint");
+        if (!config.clientId) requiredConfig.push("OIDC client ID");
+
+        if (requiredConfig.length > 0) {
+          status.textContent = "Missing configuration: " + requiredConfig.join(", ");
           button.setAttribute("disabled", "true");
           return;
         }
 
-        button.addEventListener("click", async () => {
-          button.setAttribute("disabled", "true");
+        const storageKeys = {
+          enrollRequested: "enroll:requested",
+          pkceVerifier: "enroll:pkce_verifier",
+          oidcState: "enroll:oidc_state"
+        };
+
+        const urlParams = new URLSearchParams(window.location.search);
+
+        const setBusy = (busy) => {
+          if (busy) {
+            button.setAttribute("disabled", "true");
+          } else {
+            button.removeAttribute("disabled");
+          }
+        };
+
+        const resetDownloads = () => {
+          if (certificateUrl) {
+            URL.revokeObjectURL(certificateUrl);
+            certificateUrl = null;
+          }
+          if (keyUrl) {
+            URL.revokeObjectURL(keyUrl);
+            keyUrl = null;
+          }
           certLink.classList.add("hidden");
           keyLink.classList.add("hidden");
           caSection.classList.add("hidden");
           caText.textContent = "";
+          certLink.removeAttribute("href");
+          keyLink.removeAttribute("href");
+        };
+
+        const base64UrlEncode = (input) => {
+          let buffer;
+          if (input instanceof Uint8Array) {
+            buffer = input;
+          } else {
+            buffer = new TextEncoder().encode(input);
+          }
+          let binary = "";
+          const chunkSize = 0x8000;
+          for (let i = 0; i < buffer.length; i += chunkSize) {
+            const chunk = buffer.subarray(i, i + chunkSize);
+            binary += String.fromCharCode.apply(null, Array.from(chunk));
+          }
+          return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+        };
+
+        const createPkce = async () => {
+          const randomBytes = new Uint8Array(32);
+          crypto.getRandomValues(randomBytes);
+          const verifier = base64UrlEncode(randomBytes);
+          const challengeBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+          const challenge = base64UrlEncode(new Uint8Array(challengeBuffer));
+          return { verifier, challenge };
+        };
+
+        const clearOidcFlowState = () => {
+          sessionStorage.removeItem(storageKeys.pkceVerifier);
+          sessionStorage.removeItem(storageKeys.oidcState);
+          sessionStorage.removeItem(storageKeys.enrollRequested);
+        };
+
+        const performEnrollment = async (token) => {
+          setBusy(true);
+          resetDownloads();
 
           try {
             status.textContent = "Generating a new private key...";
@@ -225,17 +302,6 @@ function buildPage(config: EnvConfig): string {
               sigalg: "SHA256withRSA",
               sbjprvkey: keypair.prvKeyObj
             });
-
-            status.textContent = "Requesting ID token...";
-            const tokenResponse = await fetch(config.oidcTokenEndpoint, { credentials: "include" });
-            if (!tokenResponse.ok) {
-              throw new Error("Token request failed (" + tokenResponse.status + ")");
-            }
-            const tokenJson = await tokenResponse.json();
-            const token = tokenJson.id_token || tokenJson.token || tokenJson.access_token;
-            if (!token) {
-              throw new Error("No token found in response");
-            }
 
             status.textContent = "Requesting certificate from step-ca...";
             const enrollResponse = await fetch("/api/enroll", {
@@ -264,12 +330,20 @@ function buildPage(config: EnvConfig): string {
             const caPem = payload.ca || payload.ca_certificate || (Array.isArray(payload.ca_chain) ? payload.ca_chain.join('\n') : undefined);
 
             const certificateBlob = new Blob([certificatePem], { type: "application/x-pem-file" });
-            certLink.href = URL.createObjectURL(certificateBlob);
+            if (certificateUrl) {
+              URL.revokeObjectURL(certificateUrl);
+            }
+            certificateUrl = URL.createObjectURL(certificateBlob);
+            certLink.href = certificateUrl;
             certLink.download = config.certificateFilename;
             certLink.classList.remove("hidden");
 
             const keyBlob = new Blob([privateKeyPem], { type: "application/x-pem-file" });
-            keyLink.href = URL.createObjectURL(keyBlob);
+            if (keyUrl) {
+              URL.revokeObjectURL(keyUrl);
+            }
+            keyUrl = URL.createObjectURL(keyBlob);
+            keyLink.href = keyUrl;
             keyLink.download = config.privateKeyFilename;
             keyLink.classList.remove("hidden");
 
@@ -283,7 +357,115 @@ function buildPage(config: EnvConfig): string {
             console.error(error);
             status.textContent = error instanceof Error ? error.message : "Unexpected error";
           } finally {
-            button.removeAttribute("disabled");
+            clearOidcFlowState();
+            setBusy(false);
+          }
+        };
+
+        const completeOidc = async () => {
+          const error = urlParams.get("error");
+          if (error) {
+            clearOidcFlowState();
+            throw new Error(urlParams.get("error_description") || error);
+          }
+
+          const code = urlParams.get("code");
+          if (!code) {
+            return;
+          }
+
+          const returnedState = urlParams.get("state") || "";
+          const expectedState = sessionStorage.getItem(storageKeys.oidcState);
+          if (!expectedState || returnedState !== expectedState) {
+            clearOidcFlowState();
+            throw new Error("OIDC state mismatch. Please try again.");
+          }
+
+          const verifier = sessionStorage.getItem(storageKeys.pkceVerifier);
+          if (!verifier) {
+            clearOidcFlowState();
+            throw new Error("Missing PKCE verifier. Please restart the request.");
+          }
+
+          setBusy(true);
+          status.textContent = "Completing sign-in...";
+
+          const redirectUri = window.location.origin + window.location.pathname;
+          const body = new URLSearchParams({
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: redirectUri,
+            client_id: config.clientId,
+            code_verifier: verifier
+          });
+
+          const tokenResponse = await fetch(config.tokenEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            credentials: "include",
+            body
+          });
+
+          const tokenJson = await tokenResponse.json().catch(() => ({}));
+          if (!tokenResponse.ok) {
+            clearOidcFlowState();
+            throw new Error(tokenJson.error_description || tokenJson.error || "Token request failed (" + tokenResponse.status + ")");
+          }
+
+          const token = tokenJson.id_token || tokenJson.access_token || tokenJson.token;
+          if (!token) {
+            clearOidcFlowState();
+            throw new Error("No token found in response");
+          }
+
+          window.history.replaceState(null, document.title, window.location.pathname + window.location.hash);
+
+          if (sessionStorage.getItem(storageKeys.enrollRequested)) {
+            await performEnrollment(token);
+          } else {
+            clearOidcFlowState();
+            status.textContent = "Sign-in complete. Click the button to request a certificate.";
+            setBusy(false);
+          }
+        };
+
+        completeOidc().catch((error) => {
+          console.error(error);
+          status.textContent = error instanceof Error ? error.message : "Unexpected error";
+          setBusy(false);
+        });
+
+        button.addEventListener("click", async () => {
+          try {
+            setBusy(true);
+            resetDownloads();
+            sessionStorage.setItem(storageKeys.enrollRequested, "1");
+
+            const { verifier, challenge } = await createPkce();
+            sessionStorage.setItem(storageKeys.pkceVerifier, verifier);
+
+            const stateBytes = new Uint8Array(16);
+            crypto.getRandomValues(stateBytes);
+            const state = base64UrlEncode(stateBytes);
+            sessionStorage.setItem(storageKeys.oidcState, state);
+
+            const authUrl = new URL(config.authorizationEndpoint);
+            const redirectUri = window.location.origin + window.location.pathname;
+            authUrl.searchParams.set("response_type", "code");
+            authUrl.searchParams.set("client_id", config.clientId);
+            authUrl.searchParams.set("scope", config.scope || "openid email profile");
+            authUrl.searchParams.set("redirect_uri", redirectUri);
+            authUrl.searchParams.set("code_challenge", challenge);
+            authUrl.searchParams.set("code_challenge_method", "S256");
+            authUrl.searchParams.set("state", state);
+
+            status.textContent = "Redirecting to sign-in...";
+            window.location.assign(authUrl.toString());
+          } catch (error) {
+            console.error(error);
+            status.textContent = error instanceof Error ? error.message : "Unexpected error";
+            clearOidcFlowState();
+            setBusy(false);
           }
         });
       })();
