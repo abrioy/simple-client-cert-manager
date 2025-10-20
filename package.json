@@ -1,0 +1,22 @@
+{
+  "name": "simple-client-cert-manager",
+  "version": "1.0.0",
+  "description": "Minimal Node.js proxy for browser-based certificate enrollment with step-ca",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "keywords": [
+    "step-ca",
+    "certificate",
+    "proxy"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
