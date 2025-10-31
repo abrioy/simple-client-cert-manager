@@ -15,7 +15,6 @@ The container is configured entirely through environment variables at runtime:
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `PORT` | Port exposed by nginx. | `8080` |
 | `STEP_CA_URL` | Base URL for the private step-ca instance. | `http://step-ca:9000` |
 | `STEP_CA_SIGN_PATH` | Path to the signing endpoint relative to `STEP_CA_URL`. | `/1.0/sign` |
 | `STEP_CA_PROFILE` | Optional profile query parameter appended to signing requests. | _unset_ |
