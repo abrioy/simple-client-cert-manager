@@ -1,0 +1,17 @@
+.certificates-view {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.certificate-output {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}

@@ -1,64 +1,99 @@
-# simple-client-cert-manager
+# Simple Client Certificate Manager
 
-Minimal React front-end that guides a user through generating a key pair in the browser, completing an OIDC Authorization Code + PKCE flow, and asking a private [step-ca](https://smallstep.com/docs/step-ca/) instance to sign the resulting CSR. The application is delivered as static assets behind an nginx proxy that forwards signing requests to step-ca. No keys or certificates are ever persisted on the server.
+A full-stack reference implementation for managing client certificates with [step-ca](https://smallstep.com/docs/step-ca/).
+The backend is an Express + TypeScript service that shells out to the `step` CLI packaged inside the official Docker image,
+while the frontend is a modern React single page application built with Vite.
 
-## Features
+## Architecture
 
-- Single-page React experience that keeps all private key material in the browser.
-- Browser-only CSR generation using [jsrsasign](https://github.com/kjur/jsrsasign).
-- OIDC Authorization Code + PKCE flow that resumes the certificate request after redirect.
-- nginx runtime that serves the static bundle and proxies `/api/sign` to step-ca.
+- **Backend** (`backend/`): Express server written in TypeScript. All interactions with step-ca are funneled through a dedicated
+  `stepCaCli` service that invokes the `smallstep/step-cli` Docker image. The service exposes REST endpoints for issuing and
+  revoking certificates and for checking CA health.
+- **Frontend** (`frontend/`): React SPA that follows contemporary best practices (React Query for data fetching, React Hook Form
+  and Zod for type-safe forms, component-driven UI). Users can issue and revoke certificates and inspect the resulting PEM data.
+- **Docker**: The backend expects Docker to be available. When an API call requires step-ca, the backend launches `docker run`
+  with the configured image, volumes, environment variables, and network options.
 
-## Configuration
+## Getting started
 
-The container is configured entirely through environment variables at runtime:
+### Prerequisites
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `STEP_CA_URL` | Base URL for the private step-ca instance. | `http://step-ca:9000` |
-| `STEP_CA_SIGN_PATH` | Path to the signing endpoint relative to `STEP_CA_URL`. | `/1.0/sign` |
-| `STEP_CA_PROFILE` | Optional profile query parameter appended to signing requests. | _unset_ |
-| `ENROLLMENT_API_PATH` | Front-end endpoint proxied by nginx to the step-ca signing API. | `/api/sign` |
-| `OIDC_AUTHORIZATION_ENDPOINT` | OIDC authorization endpoint used for the Authorization Code + PKCE flow. | _(required)_ |
-| `OIDC_TOKEN_ENDPOINT` | OIDC token endpoint used to exchange the authorization code for tokens. | _(required)_ |
-| `OIDC_CLIENT_ID` | Registered OIDC client identifier for this application. | _(required)_ |
-| `OIDC_SCOPE` | Space-separated scopes requested during authorization. | `openid email profile` |
-| `CERTIFICATE_SUBJECT` | Subject string embedded in generated CSRs (e.g. `CN=my-user,O=Example`). | `CN=client` |
-| `CERTIFICATE_FILENAME` | Suggested filename for the downloaded certificate. | `client.crt` |
-| `PRIVATE_KEY_FILENAME` | Suggested filename for the downloaded private key. | `client.key` |
+- Node.js 20+
+- Docker Engine available to the backend process
 
-## Local development
-
-Install dependencies and run the Vite development server:
+### Install dependencies
 
 ```bash
 npm install
-npm run dev
 ```
 
-The app loads runtime configuration from `/config.js`. When developing locally, you can create a `.env.local` file and rely on Vite's [environment variable support](https://vitejs.dev/guide/env-and-mode.html), or manually author a `public/config.js` file with the desired values.
+This installs dependencies for both the backend and frontend workspaces.
 
-Build the production bundle:
+### Running the backend
+
+```bash
+npm run dev:backend
+```
+
+The backend loads configuration from environment variables (see [Configuration](#configuration)).
+
+### Running the frontend
+
+```bash
+npm run dev:frontend
+```
+
+By default the Vite dev server proxies `/api` calls to `http://localhost:4000`.
+
+### Building for production
 
 ```bash
 npm run build
 ```
 
+The backend TypeScript sources are compiled to `backend/dist` and the frontend bundle is written to `frontend/dist`.
+The backend can serve the static bundle when the `STATIC_FILES_DIR` environment variable is set to `frontend/dist` (or another
+path containing the built assets).
+
+## Configuration
+
+The backend is configured through environment variables. Most settings are optional but you must supply the information required
+for your step-ca instance.
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `PORT` | Port the Express server listens on. | `4000` |
+| `STATIC_FILES_DIR` | Path to static assets to be served by Express (e.g. `frontend/dist`). | _unset_ |
+| `STEP_CA_DOCKER_IMAGE` | Docker image that provides the `step` CLI. | `smallstep/step-cli:latest` |
+| `STEP_CA_DOCKER_VOLUMES` | Comma-separated list of Docker volume mounts passed to `docker run`. | _unset_ |
+| `STEP_CA_DOCKER_ENV` | Comma-separated list of `KEY=value` pairs forwarded as environment variables to the container. | _unset_ |
+| `STEP_CA_DOCKER_NETWORK` | Docker network passed to `docker run --network`. | _unset_ |
+| `STEP_CA_URL` | URL of the step-ca instance. | _unset_ |
+| `STEP_CA_ROOT_CERT_PATH` | Path (inside the container) to the root certificate used to verify the CA. | _unset_ |
+| `STEP_CA_FINGERPRINT` | Root certificate fingerprint used for bootstrapping. | _unset_ |
+| `STEP_CA_PROVISIONER` | Provisioner name used when issuing or revoking certificates. | _unset_ |
+| `STEP_CA_PROVISIONER_PASSWORD_FILE` | Path to the provisioner password file accessible within the container. | _unset_ |
+| `STEP_CA_TOKEN` | Optional one-time token for certificate enrollment. | _unset_ |
+
+Volumes are specified using normal Docker syntax, for example:
+
+```
+STEP_CA_DOCKER_VOLUMES=/host/path/step:/home/step,
+  /host/path/passwords:/passwords
+STEP_CA_DOCKER_ENV=STEP_CA_URL=https://step-ca:9000,STEP_CA_CONFIG=/home/step/config/ca.json
+```
+
 ## Docker image
 
-The provided multi-stage `Dockerfile` builds the React bundle and packages it with nginx. Example invocation:
+The provided `Dockerfile` builds the frontend and backend into a single container image. The resulting image starts the backend
+Express server and serves the compiled React bundle.
 
 ```bash
 docker build -t simple-client-cert-manager .
-docker run --rm -p 8080:8080 \ \
-  -e STEP_CA_URL="https://step-ca.internal" \ \
-  -e STEP_CA_SIGN_PATH="/1.0/sign" \ \
-  -e OIDC_AUTHORIZATION_ENDPOINT="https://auth.example.com/oauth2/authorize" \ \
-  -e OIDC_TOKEN_ENDPOINT="https://auth.example.com/oauth2/token" \ \
-  -e OIDC_CLIENT_ID="spa-client" \ \
+docker run --rm -p 4000:4000 \
+  -e STEP_CA_DOCKER_VOLUMES="/path/to/step:/home/step" \
+  -e STEP_CA_DOCKER_ENV="STEP_CA_URL=https://step-ca:9000" \
   simple-client-cert-manager
 ```
 
-At runtime the entrypoint renders `/config.js` with the supplied environment variables and templates the nginx configuration so that `/api/sign` (or the path defined by `ENROLLMENT_API_PATH`) is proxied directly to the configured step-ca instance.
-
-Navigate to `http://localhost:8080` to request a client certificate.
+With `STATIC_FILES_DIR=frontend/dist`, navigate to `http://localhost:4000` to use the SPA.
