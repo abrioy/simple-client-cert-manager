@@ -1,0 +1,38 @@
+.card {
+  background: rgba(15, 23, 42, 0.85);
+  border-radius: 16px;
+  padding: 1.75rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.card__header h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.card__header p {
+  margin: 0.25rem 0 0;
+  color: #94a3b8;
+}
+
+.card__action {
+  display: flex;
+  align-items: center;
+}
+
+.card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
