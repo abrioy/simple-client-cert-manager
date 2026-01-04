@@ -115,11 +115,11 @@ labels:
 ```bash
 # Install server dependencies
 cd server
-npm install
+pnpm install
 
 # Install client dependencies
 cd ../client
-npm install
+pnpm install
 ```
 
 ### Set up environment
@@ -134,13 +134,13 @@ cp .env.example .env
 Terminal 1 (Backend):
 ```bash
 cd server
-npm run dev
+pnpm run dev
 ```
 
 Terminal 2 (Frontend):
 ```bash
 cd client
-npm run dev
+pnpm run dev
 ```
 
 Frontend will be available at http://localhost:5173 (proxies API to backend on port 3000)
@@ -150,14 +150,21 @@ Frontend will be available at http://localhost:5173 (proxies API to backend on p
 ```bash
 # Build frontend
 cd client
-npm run build
+pnpm run build
 
 # Start production server
 cd ../server
-npm start
+pnpm start
 ```
 
 Access at http://localhost:3000
+
+### Quick start with run.sh
+
+```bash
+# Build and run container in development mode
+./run.sh
+```
 
 ## Environment Variables
 

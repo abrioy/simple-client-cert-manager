@@ -1,9 +1,7 @@
-import { execFile } from 'child_process';
+import { spawn } from 'child_process';
 import { promisify } from 'util';
 import { promises as fs } from 'fs';
 import path from 'path';
-
-const execFileAsync = promisify(execFile);
 
 const CERT_DIR = process.env.CERT_DIR || '/certs';
 const DATA_DIR = process.env.DATA_DIR || '/data';
@@ -12,102 +10,131 @@ const INTERMEDIATE_CERT = path.join(CERT_DIR, 'intermediate.pem');
 const INTERMEDIATE_KEY = path.join(CERT_DIR, 'intermediate-key.pem');
 
 /**
- * Execute an OpenSSL command and return both the command string and result
+ * Execute an OpenSSL command with optional stdin and return both the command string and result
  */
-async function executeOpenSSL(args, description) {
+async function executeOpenSSL(args, description, stdinData = null) {
   const command = `openssl ${args.join(' ')}`;
-  try {
-    const { stdout, stderr } = await execFileAsync('openssl', args);
-    return {
-      command,
-      description,
-      success: true,
-      output: stdout || stderr || 'Command completed successfully'
-    };
-  } catch (error) {
-    return {
-      command,
-      description,
-      success: false,
-      output: error.message,
-      stderr: error.stderr
-    };
-  }
+
+  return new Promise((resolve) => {
+    const proc = spawn('openssl', args);
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve({
+          command,
+          description,
+          success: true,
+          output: stdout || stderr || 'Command completed successfully',
+          data: stdout
+        });
+      } else {
+        resolve({
+          command,
+          description,
+          success: false,
+          output: stderr || stdout || 'Command failed',
+          stderr: stderr
+        });
+      }
+    });
+
+    if (stdinData) {
+      proc.stdin.write(stdinData);
+      proc.stdin.end();
+    }
+  });
 }
 
 /**
- * Generate a P12 bundle with client certificate
+ * Generate a P12 bundle with client certificate (no temporary files)
  */
 export async function generateClientCertificate(email, label, password = '') {
   const certId = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
   const certPath = path.join(DATA_DIR, 'certs', certId);
   await fs.mkdir(certPath, { recursive: true });
 
-  const keyFile = path.join(certPath, 'client-key.pem');
-  const csrFile = path.join(certPath, 'client.csr');
-  const certFile = path.join(certPath, 'client-cert.pem');
-  const p12File = path.join(certPath, 'client.p12');
-  const chainFile = path.join(certPath, 'chain.pem');
-
   const commands = [];
+  const validityDays = process.env.CERT_VALIDITY_DAYS || '180';
 
-  // 1. Generate private key
+  // 1. Generate private key (to stdout)
   let result = await executeOpenSSL(
-    ['genrsa', '-out', keyFile, '2048'],
+    ['genrsa', '2048'],
     'Generate 2048-bit RSA private key'
   );
   commands.push(result);
   if (!result.success) throw new Error('Failed to generate private key');
+  const privateKey = result.data;
 
-  // 2. Create CSR
+  // 2. Create CSR from private key (via stdin)
   const subject = `/CN=${email}/emailAddress=${email}`;
   result = await executeOpenSSL(
-    ['req', '-new', '-key', keyFile, '-out', csrFile, '-subj', subject],
-    'Create Certificate Signing Request (CSR)'
+    ['req', '-new', '-key', '/dev/stdin', '-subj', subject],
+    'Create Certificate Signing Request (CSR)',
+    privateKey
   );
   commands.push(result);
   if (!result.success) throw new Error('Failed to create CSR');
+  const csr = result.data;
 
-  // 3. Sign certificate with intermediate CA
-  const validityDays = process.env.CERT_VALIDITY_DAYS || '180'; // 6 months default
+  // 3. Ensure serial file exists
   const serialFile = path.join(DATA_DIR, 'serial.txt');
-
-  // Ensure serial file exists
   try {
     await fs.access(serialFile);
   } catch {
     await fs.writeFile(serialFile, '1000\n');
   }
 
+  // 4. Sign certificate with intermediate CA (CSR via stdin)
   result = await executeOpenSSL(
     [
       'x509', '-req',
-      '-in', csrFile,
       '-CA', INTERMEDIATE_CERT,
       '-CAkey', INTERMEDIATE_KEY,
       '-CAserial', serialFile,
-      '-out', certFile,
       '-days', validityDays,
       '-sha256'
     ],
-    `Sign certificate valid for ${validityDays} days`
+    `Sign certificate valid for ${validityDays} days`,
+    csr
   );
   commands.push(result);
   if (!result.success) throw new Error('Failed to sign certificate');
+  const certificate = result.data;
 
-  // 4. Create certificate chain (client cert + intermediate + root)
-  const clientCert = await fs.readFile(certFile, 'utf8');
+  // 5. Save certificate for revocation purposes
+  const certFile = path.join(certPath, 'client-cert.pem');
+  await fs.writeFile(certFile, certificate);
+
+  // 6. Read intermediate cert for P12 bundle
   const intermediateCert = await fs.readFile(INTERMEDIATE_CERT, 'utf8');
-  const rootCert = await fs.readFile(ROOT_CERT, 'utf8');
-  await fs.writeFile(chainFile, `${clientCert}\n${intermediateCert}\n${rootCert}`);
 
-  // 5. Create P12 bundle
+  // 7. Create temporary files only for P12 creation (OpenSSL pkcs12 requires files)
+  const tmpKeyFile = path.join(certPath, 'tmp-key.pem');
+  const tmpCertFile = path.join(certPath, 'tmp-cert.pem');
+  const tmpIntFile = path.join(certPath, 'tmp-int.pem');
+  const p12File = path.join(certPath, 'client.p12');
+
+  await fs.writeFile(tmpKeyFile, privateKey);
+  await fs.writeFile(tmpCertFile, certificate);
+  await fs.writeFile(tmpIntFile, intermediateCert);
+
   const p12Args = [
     'pkcs12', '-export',
     '-out', p12File,
-    '-inkey', keyFile,
-    '-in', certFile,
-    '-certfile', INTERMEDIATE_CERT
+    '-inkey', tmpKeyFile,
+    '-in', tmpCertFile,
+    '-certfile', tmpIntFile
   ];
 
   if (password) {
@@ -121,15 +148,22 @@ export async function generateClientCertificate(email, label, password = '') {
     password ? 'Create password-protected P12 bundle' : 'Create P12 bundle (no password)'
   );
   commands.push(result);
+
+  // Clean up temporary files immediately
+  await fs.unlink(tmpKeyFile);
+  await fs.unlink(tmpCertFile);
+  await fs.unlink(tmpIntFile);
+
   if (!result.success) throw new Error('Failed to create P12 bundle');
 
   // Read the P12 file
   const p12Data = await fs.readFile(p12File);
 
-  // Get certificate details
+  // Get certificate details (cert via stdin)
   result = await executeOpenSSL(
-    ['x509', '-in', certFile, '-noout', '-text'],
-    'Display certificate details'
+    ['x509', '-noout', '-text'],
+    'Display certificate details',
+    certificate
   );
   commands.push(result);
 
@@ -156,6 +190,7 @@ export async function revokeCertificate(certId) {
   const crlFile = path.join(DATA_DIR, 'crl.pem');
   const crlNumberFile = path.join(DATA_DIR, 'crlnumber.txt');
   const indexFile = path.join(DATA_DIR, 'index.txt');
+  const configFile = path.join(DATA_DIR, 'openssl-crl.cnf');
   const commands = [];
 
   // Ensure CRL infrastructure exists
@@ -171,9 +206,11 @@ export async function revokeCertificate(certId) {
     await fs.writeFile(indexFile, '');
   }
 
-  // Create a temporary OpenSSL config for CRL
-  const configFile = path.join(DATA_DIR, 'openssl-crl.cnf');
-  const config = `
+  // Ensure OpenSSL config exists (persistent, not temporary)
+  try {
+    await fs.access(configFile);
+  } catch {
+    const config = `
 [ ca ]
 default_ca = CA_default
 
@@ -183,11 +220,11 @@ crlnumber = ${crlNumberFile}
 default_crl_days = 30
 default_md = sha256
 `;
-  await fs.writeFile(configFile, config);
+    await fs.writeFile(configFile, config);
+  }
 
-  // Add cert to index if not already there
+  // Get cert info
   try {
-    const certData = await fs.readFile(certFile, 'utf8');
     const result = await executeOpenSSL(
       ['x509', '-in', certFile, '-noout', '-serial', '-subject'],
       'Get certificate serial and subject'
@@ -230,28 +267,41 @@ default_md = sha256
  */
 export async function getCRL() {
   const crlFile = path.join(DATA_DIR, 'crl.pem');
+  const crlNumberFile = path.join(DATA_DIR, 'crlnumber.txt');
+  const indexFile = path.join(DATA_DIR, 'index.txt');
+  const configFile = path.join(DATA_DIR, 'openssl-crl.cnf');
   const commands = [];
 
   try {
     const crlData = await fs.readFile(crlFile, 'utf8');
     const result = await executeOpenSSL(
-      ['crl', '-in', crlFile, '-noout', '-text'],
-      'Display CRL contents'
+      ['crl', '-noout', '-text'],
+      'Display CRL contents',
+      crlData
     );
     commands.push(result);
 
     return { crlData, commands };
   } catch (error) {
     // No CRL yet - generate an empty one
-    const crlNumberFile = path.join(DATA_DIR, 'crlnumber.txt');
-    const indexFile = path.join(DATA_DIR, 'index.txt');
-
     await fs.mkdir(DATA_DIR, { recursive: true });
-    await fs.writeFile(crlNumberFile, '1000\n');
-    await fs.writeFile(indexFile, '');
 
-    const configFile = path.join(DATA_DIR, 'openssl-crl.cnf');
-    const config = `
+    try {
+      await fs.access(crlNumberFile);
+    } catch {
+      await fs.writeFile(crlNumberFile, '1000\n');
+    }
+
+    try {
+      await fs.access(indexFile);
+    } catch {
+      await fs.writeFile(indexFile, '');
+    }
+
+    try {
+      await fs.access(configFile);
+    } catch {
+      const config = `
 [ ca ]
 default_ca = CA_default
 
@@ -261,7 +311,8 @@ crlnumber = ${crlNumberFile}
 default_crl_days = 30
 default_md = sha256
 `;
-    await fs.writeFile(configFile, config);
+      await fs.writeFile(configFile, config);
+    }
 
     const result = await executeOpenSSL(
       [

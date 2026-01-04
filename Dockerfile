@@ -1,25 +1,28 @@
 # Build stage for frontend
 FROM node:20-alpine AS frontend-builder
 
+# Install pnpm
+RUN npm install -g pnpm
+
 WORKDIR /app/client
 
 # Copy frontend package files
 COPY client/package*.json ./
 
 # Install frontend dependencies
-RUN npm ci
+RUN pnpm install --frozen-lockfile
 
 # Copy frontend source
 COPY client/ ./
 
 # Build frontend
-RUN npm run build
+RUN pnpm run build
 
 # Production stage
 FROM node:20-alpine
 
-# Install OpenSSL
-RUN apk add --no-cache openssl
+# Install OpenSSL and pnpm
+RUN apk add --no-cache openssl && npm install -g pnpm
 
 WORKDIR /app
 
@@ -28,7 +31,7 @@ COPY server/package*.json ./server/
 
 # Install server dependencies
 WORKDIR /app/server
-RUN npm ci --production
+RUN pnpm install --frozen-lockfile --prod
 
 # Copy server source
 COPY server/ ./
