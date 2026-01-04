@@ -1,27 +1,56 @@
-FROM smallstep/step-cli:latest AS step
+# Build stage for frontend
+FROM node:20-alpine AS frontend-builder
 
-FROM node:20-bullseye-slim AS deps
-WORKDIR /app
-COPY package.json ./
-RUN npm install
+WORKDIR /app/client
 
-FROM node:20-bullseye-slim AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+# Copy frontend package files
+COPY client/package*.json ./
+
+# Install frontend dependencies
+RUN npm ci
+
+# Copy frontend source
+COPY client/ ./
+
+# Build frontend
 RUN npm run build
 
-FROM node:20-bullseye-slim AS runner
+# Production stage
+FROM node:20-alpine
+
+# Install OpenSSL
+RUN apk add --no-cache openssl
+
 WORKDIR /app
+
+# Copy server package files
+COPY server/package*.json ./server/
+
+# Install server dependencies
+WORKDIR /app/server
+RUN npm ci --production
+
+# Copy server source
+COPY server/ ./
+
+# Copy built frontend
+COPY --from=frontend-builder /app/client/dist /app/client/dist
+
+# Create directories for certificates and data
+RUN mkdir -p /certs /data/certs
+
+# Expose port
+EXPOSE 3000
+
+# Set environment variables
 ENV NODE_ENV=production
 ENV PORT=3000
-COPY package.json ./
-RUN npm install --omit=dev
-COPY --from=step /usr/bin/step /usr/local/bin/step
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/next.config.mjs ./next.config.mjs
-COPY --from=builder /app/tsconfig.json ./tsconfig.json
-COPY --from=builder /app/app ./app
-EXPOSE 3000
-CMD ["npm", "run", "start"]
+ENV CERT_DIR=/certs
+ENV DATA_DIR=/data
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/api/user', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+
+# Start server
+CMD ["node", "index.js"]
