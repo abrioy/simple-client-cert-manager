@@ -1,84 +1,213 @@
-# Simple Client Certificate Manager
+# Client Certificate Manager
 
-A minimal Next.js application that issues mutual TLS client certificates via
-[`step-ca`](https://smallstep.com/docs/step-ca/). Private keys are generated in the
-browser and never leave the user's device. The server simply receives a CSR and
-shells out to the `step` CLI to sign it.
+A secure, minimal web application for generating P12 client certificates using OpenSSL CLI.
 
 ## Features
 
-- Next.js (App Router) with a single page that generates RSA key pairs in the
-  browser and downloads the resulting certificate + key pair.
-- API route that invokes the `step` CLI with an OIDC ID token supplied by the
-  browser. No keys or certificates are persisted on disk beyond the lifetime of
-  the request.
-- Ready-to-run Docker image with the `step` binary baked in.
+- Generate client certificates in P12 bundle format
+- View all generated certificates
+- Revoke certificates using Certificate Revocation List (CRL)
+- Minimal dependencies for maximum security
+- React frontend served by Node/Express backend
+- All certificate operations use OpenSSL CLI
+- Command history displayed in UI for transparency
+- Docker containerized
+
+## Architecture
+
+### Backend (Node/Express)
+- Express server serving static React bundle
+- REST API for certificate operations
+- OpenSSL CLI wrapper for all crypto operations
+- JSON file-based certificate storage (no database dependency)
+
+### Frontend (React + Vite)
+- Single Page Application
+- Displays user email from forward auth header
+- Shows OpenSSL command history
+- Download P12 bundles directly
 
 ## Prerequisites
 
-- Node.js 20+
-- A reachable `step-ca` instance and the `step` CLI configuration required to
-  sign CSRs with OIDC tokens.
-- An OIDC provider capable of returning an ID token to the browser (for testing
-  you can supply a static token via environment variable).
+- Docker (for containerized deployment)
+- OR Node.js 20+ (for local development)
+- Root and intermediate CA certificates and keys
 
-## Installation
+## Certificate Setup
+
+Before running the application, you need:
+
+1. **Root Certificate** (`/certs/root.pem`)
+2. **Intermediate Certificate** (`/certs/intermediate.pem`)
+3. **Intermediate Private Key** (`/certs/intermediate-key.pem`)
+
+### Example: Generate Test Certificates
 
 ```bash
+# Create certs directory
+mkdir -p certs
+
+# Generate root CA
+openssl genrsa -out certs/root-key.pem 4096
+openssl req -new -x509 -days 3650 -key certs/root-key.pem -out certs/root.pem \
+  -subj "/C=US/O=Example Org/CN=Root CA"
+
+# Generate intermediate CA
+openssl genrsa -out certs/intermediate-key.pem 4096
+openssl req -new -key certs/intermediate-key.pem -out certs/intermediate.csr \
+  -subj "/C=US/O=Example Org/CN=Intermediate CA"
+
+# Sign intermediate with root
+openssl x509 -req -days 1825 -in certs/intermediate.csr \
+  -CA certs/root.pem -CAkey certs/root-key.pem -CAcreateserial \
+  -out certs/intermediate.pem -sha256
+
+# Clean up CSR
+rm certs/intermediate.csr
+```
+
+## Docker Deployment
+
+### Build the image
+
+```bash
+docker build -t client-cert-manager .
+```
+
+### Run the container
+
+```bash
+docker run -d \
+  --name cert-manager \
+  -p 3000:3000 \
+  -v $(pwd)/certs:/certs:ro \
+  -v $(pwd)/data:/data \
+  -e CERT_VALIDITY_DAYS=180 \
+  client-cert-manager
+```
+
+### Behind a reverse proxy with forward auth
+
+Example nginx configuration:
+
+```nginx
+location / {
+  proxy_pass http://localhost:3000;
+  proxy_set_header X-Forwarded-Email $user_email;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+Example Traefik labels:
+
+```yaml
+labels:
+  - "traefik.http.middlewares.auth.forwardauth.address=http://auth-service"
+  - "traefik.http.middlewares.auth.forwardauth.authResponseHeaders=X-Forwarded-Email"
+  - "traefik.http.routers.cert-manager.middlewares=auth"
+```
+
+## Local Development
+
+### Install dependencies
+
+```bash
+# Install server dependencies
+cd server
+npm install
+
+# Install client dependencies
+cd ../client
 npm install
 ```
 
-## Development
+### Set up environment
 
 ```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+### Run in development mode
+
+Terminal 1 (Backend):
+```bash
+cd server
 npm run dev
 ```
 
-The page is available at `http://localhost:3000`. Click the button to generate
-an RSA key pair and CSR inside the browser, fetch an ID token, and request a
-signed certificate from `step-ca`.
-
-### Required environment variables
-
-| Variable | Scope | Description |
-| --- | --- | --- |
-| `STEP_CA_URL` | Server | CA URL passed to `step ca sign --ca-url`. Optional if `step` is already configured. |
-| `STEP_CA_ROOT_CERT` | Server | Path to the root certificate used by `step` (`--root`). |
-| `STEP_CA_FINGERPRINT` | Server | Root certificate fingerprint (`--fingerprint`). |
-| `STEP_CA_PROVISIONER` | Server | Provisioner to use (`--provisioner`). |
-| `STEP_CA_PROVISIONER_PASSWORD_FILE` | Server | Path to provisioner password file (`--password-file`). |
-| `STEP_CA_NOT_BEFORE` | Server | Optional override for `--not-before`. |
-| `STEP_CA_NOT_AFTER` | Server | Optional override for `--not-after`. |
-| `STEP_CLI_BIN` | Server | Path to the `step` binary (defaults to `step`). |
-| `NEXT_PUBLIC_OIDC_TOKEN_ENDPOINT` | Client | URL the browser will call to obtain an ID token. Must respond with JSON `{ "id_token": "..." }`. |
-| `NEXT_PUBLIC_STATIC_ID_TOKEN` | Client | Optional static token for testing (skips the token fetch step). |
-
-## Docker
-
-Build the production image:
-
+Terminal 2 (Frontend):
 ```bash
-docker build -t simple-client-cert-manager .
+cd client
+npm run dev
 ```
 
-Run the container, forwarding configuration to the API route:
+Frontend will be available at http://localhost:5173 (proxies API to backend on port 3000)
+
+### Build for production
 
 ```bash
-docker run --rm -p 3000:3000 \
-  -e STEP_CA_URL="https://step-ca:9000" \
-  -e STEP_CA_ROOT_CERT="/home/step/root_ca.crt" \
-  -e STEP_CA_FINGERPRINT="<fingerprint>" \
-  -e STEP_CA_PROVISIONER="oidc-provisioner" \
-  -e STEP_CA_PROVISIONER_PASSWORD_FILE="/run/secrets/provisioner-pass" \
-  -e NEXT_PUBLIC_OIDC_TOKEN_ENDPOINT="https://issuer.example.com/token" \
-  simple-client-cert-manager
+# Build frontend
+cd client
+npm run build
+
+# Start production server
+cd ../server
+npm start
 ```
 
-## Security considerations
+Access at http://localhost:3000
 
-- The browser generates the key pair using `node-forge` and only sends the CSR
-  (public information) to the server.
-- The API route writes CSR and certificate data to a temporary directory that is
-  deleted after signing, ensuring no long-term persistence on disk.
-- Always secure the deployment with HTTPS and restrict access to the API route
-  as appropriate for your environment.
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | Server port |
+| `NODE_ENV` | `production` | Environment mode |
+| `CERT_DIR` | `/certs` | Directory containing CA certificates |
+| `DATA_DIR` | `/data` | Directory for certificate storage and CRL |
+| `CERT_VALIDITY_DAYS` | `180` | Certificate validity period (6 months) |
+
+## API Endpoints
+
+- `GET /api/user` - Get user info from X-Forwarded-Email header
+- `POST /api/certificates` - Generate new client certificate
+- `GET /api/certificates` - List all certificates
+- `POST /api/certificates/:id/revoke` - Revoke a certificate
+- `GET /api/crl` - Get current Certificate Revocation List
+
+## Security Considerations
+
+- Runs behind reverse proxy with forward authentication
+- Minimal dependencies (only Express and React)
+- All crypto operations use OpenSSL CLI (audited and trusted)
+- Intermediate CA key stored securely (read-only mount)
+- No client-side crypto (private keys generated server-side)
+- Command output transparency (users see all OpenSSL commands)
+
+## Project Structure
+
+```
+.
+├── client/                 # React frontend
+│   ├── src/
+│   │   ├── App.jsx        # Main application component
+│   │   ├── main.jsx       # React entry point
+│   │   └── api.js         # API service
+│   ├── index.html         # HTML template with inline CSS
+│   ├── vite.config.js     # Vite configuration
+│   └── package.json
+├── server/                # Node/Express backend
+│   ├── index.js          # Express server
+│   ├── openssl.js        # OpenSSL CLI wrapper
+│   ├── storage.js        # Certificate storage
+│   └── package.json
+├── Dockerfile
+├── .env.example
+└── README.md
+```
+
+## License
+
+MIT
